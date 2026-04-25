@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Test results
+results/
+*.json
+
+# nanobot local install (dependencies installed via --target)
+nanobot/
+loguru/
+openai/
+tiktoken/
+json_repair/
+duckduckgo_search/
+ddgs/
+pydantic/
+pydantic_core/
+typing_extensions.py
+httpx/
+anyio/
+sniffio/
+h11/
+certifi/
+idna/
+charset_normalizer/
+multidict/
+propcache/
+yarl/
+frozenlist/
+markdown_it_py/
+mdurl/
+pygments/
+rich/
+filelock/
+dill/
+greenlet/
+annotated_types/
+jsonschema/
+referencing/
+rpds_py/
+bin/
+
+# Workspace (agent-generated files)
+workspace/
+
+# nanobot config (contains API keys)
+.nanobot/
+
+# OS
+.DS_Store
+*.swp
+*.swo
