@@ -174,28 +174,42 @@ async def main():
         "pid": os.getpid(),
     }
 
-    t0 = time.perf_counter()
+    t_init_start = time.perf_counter()
     try:
         bot = Nanobot.from_config(config_path=config_path)
+    except Exception as e:
+        result_data["error"] = f"InitError: {type(e).__name__}: {str(e)[:200]}"
+        traceback.print_exc()
+        with open(result_file, "w") as f:
+            json.dump(result_data, f, indent=2)
+        return
+    init_ms = (time.perf_counter() - t_init_start) * 1000
+
+    t_run_start = time.perf_counter()
+    try:
         result = await bot.run(task_prompt, session_key=f"oversub:{instance_id}", hooks=[hook])
         result_data["response_preview"] = result.content[:500] if result.content else ""
     except Exception as e:
         result_data["error"] = f"{type(e).__name__}: {str(e)[:200]}"
         traceback.print_exc()
-    elapsed_ms = (time.perf_counter() - t0) * 1000
+    run_ms = (time.perf_counter() - t_run_start) * 1000
+    elapsed_ms = init_ms + run_ms
 
     total_llm = sum(t["llm_latency_ms"] for t in hook.turns)
     total_tool = sum(t["tool_latency_ms"] for t in hook.turns)
-    total_fwk = max(0, elapsed_ms - total_llm - total_tool)
+    total_fwk_run = max(0, run_ms - total_llm - total_tool)
 
     result_data.update({
         "total_latency_ms": round(elapsed_ms, 2),
+        "init_latency_ms": round(init_ms, 2),
+        "run_latency_ms": round(run_ms, 2),
         "total_tool_calls": hook.tool_calls_total,
         "total_prompt_tokens": hook.prompt_tokens_total,
         "total_completion_tokens": hook.completion_tokens_total,
         "total_llm_latency_ms": round(total_llm, 2),
         "total_tool_latency_ms": round(total_tool, 2),
-        "total_framework_latency_ms": round(total_fwk, 2),
+        "total_framework_latency_ms": round(total_fwk_run + init_ms, 2),
+        "framework_run_ms": round(total_fwk_run, 2),
         "num_turns": len(hook.turns),
         "turns": hook.turns,
     })

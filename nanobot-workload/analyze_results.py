@@ -127,7 +127,7 @@ def analyze_agent(filepath: str):
         inst.get("num_threads") or inst.get("ctx_switches_vol")
         for inst in instances
     )
-    glb_ctx = glb_data if isinstance(glb_data, dict) else {}
+    glb_ctx = glob_data if isinstance(glob_data, dict) else {}
     if has_proc_metrics or glb_ctx.get("total_processes"):
         print(f"\n  {c('bold')}▌ Process / Thread Overhead{c('reset')}")
         total_procs = glb_ctx.get("total_processes", len(instances))
@@ -142,7 +142,7 @@ def analyze_agent(filepath: str):
         if not total_invol:
             total_invol = sum(i.get("ctx_switches_invol", 0) for i in instances)
         cxs_per_sec = glb_ctx.get("ctx_switches_per_sec",
-                                   (total_vol + total_invol) / max(1, dur))
+                                   (total_vol + total_invol) / max(1, config.get("duration_sec", 1)))
         mode = config.get("mode", "coro")
         print(f"    Mode               : {c('bold')}{mode}{c('reset')}")
         print(f"    Total Processes    : {total_procs}")
@@ -249,6 +249,10 @@ def analyze_agent(filepath: str):
     )
     if has_breakdown:
         print(f"\n  {c('bold')}▌ Latency Breakdown — LLM / Tool / Framework{c('reset')}")
+    has_init = any(inst.get("init_latency_ms") for inst in instances)
+    if has_init:
+        print(f"    {c('llm')}██{c('reset')}=LLM  {c('tool')}██{c('reset')}=Tool  {c('framework')}██{c('reset')}=Framework(init)  {c('framework')}██{c('reset')}=Framework(run)")
+    else:
         print(f"    {c('llm')}██{c('reset')}=LLM  {c('tool')}██{c('reset')}=Tool  {c('framework')}██{c('reset')}=Framework")
         max_total = max((i.get("total_latency_ms", 0) for i in instances), default=1) / 1000
         bar_width = 45
@@ -473,7 +477,7 @@ def analyze_agent(filepath: str):
     print(f"    Avg Tool Calls     : {statistics.mean([i.get('total_tool_calls',0) for i in instances]):.1f}")
     print(f"    Avg Turns/Task     : {statistics.mean([i.get('num_turns',0) for i in instances]):.1f}")
 
-    glb_ctx2 = glb_data if isinstance(glb_data, dict) else {}
+    glb_ctx2 = glob_data if isinstance(glob_data, dict) else {}
     if glb_ctx2.get("total_processes") or any(i.get("num_threads") for i in instances):
         total_procs = glb_ctx2.get("total_processes", len(instances))
         total_threads = glb_ctx2.get("total_threads", 0) or sum(
