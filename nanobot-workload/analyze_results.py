@@ -122,6 +122,54 @@ def analyze_agent(filepath: str):
         print(f"    {sparkline(cpu_samples, 70)}")
         print(f"    {c('dim')}{'0%':<35}{'100%':>35}{c('reset')}")
 
+    # --- Process / Thread Overhead ---
+    has_proc_metrics = any(
+        inst.get("num_threads") or inst.get("ctx_switches_vol")
+        for inst in instances
+    )
+    glb_ctx = glb_data if isinstance(glb_data, dict) else {}
+    if has_proc_metrics or glb_ctx.get("total_processes"):
+        print(f"\n  {c('bold')}▌ Process / Thread Overhead{c('reset')}")
+        total_procs = glb_ctx.get("total_processes", len(instances))
+        total_threads = glb_ctx.get("total_threads", 0)
+        if not total_threads:
+            total_threads = sum(i.get("num_threads", 0) for i in instances
+                               if isinstance(i.get("num_threads"), int))
+        total_vol = glb_ctx.get("total_ctx_switches_vol", 0)
+        total_invol = glb_ctx.get("total_ctx_switches_invol", 0)
+        if not total_vol:
+            total_vol = sum(i.get("ctx_switches_vol", 0) for i in instances)
+        if not total_invol:
+            total_invol = sum(i.get("ctx_switches_invol", 0) for i in instances)
+        cxs_per_sec = glb_ctx.get("ctx_switches_per_sec",
+                                   (total_vol + total_invol) / max(1, dur))
+        mode = config.get("mode", "coro")
+        print(f"    Mode               : {c('bold')}{mode}{c('reset')}")
+        print(f"    Total Processes    : {total_procs}")
+        print(f"    Total Threads      : {total_threads}")
+        print(f"    Avg Threads/Proc   : {total_threads/max(1,total_procs):.1f}")
+        print(f"    Ctx Switch (vol)   : {total_vol:,}")
+        print(f"    Ctx Switch (invol) : {total_invol:,}")
+        print(f"    Ctx Switch Total   : {c('bold')}{total_vol+total_invol:,}{c('reset')} "
+              f"({cxs_per_sec:.0f}/sec)")
+        if total_threads > 0:
+            thread_bar_w = 40
+            max_thr = max((i.get("num_threads", 0) for i in instances
+                          if isinstance(i.get("num_threads"), int)), default=1)
+            print(f"\n    Threads per instance:")
+            for inst in sorted(instances, key=lambda x: x.get("instance_id", 0)):
+                iid = inst.get("instance_id", "?")
+                wtype = inst.get("workload_type", "?")
+                nthr = inst.get("num_threads", 0)
+                if not isinstance(nthr, int):
+                    continue
+                bar_n = min(int(nthr / max(max_thr, 1) * thread_bar_w), thread_bar_w)
+                color = c(wtype)
+                blk = chr(9608) * bar_n
+                lgt = chr(9617) * (thread_bar_w - bar_n)
+                print(f"      {color}#{iid:2d} {wtype:<8}{c('reset')} "
+                      f"{blk}{lgt} {nthr}")
+
     # --- Per-instance latency bar chart ---
     print(f"\n  {c('bold')}▌ Task Latency by Instance{c('reset')}")
     max_lat = max((i.get("total_latency_ms", 0) for i in instances), default=1)
@@ -145,7 +193,7 @@ def analyze_agent(filepath: str):
     # --- Per-instance details table ---
     print(f"\n  {c('bold')}▌ Detailed Metrics{c('reset')}")
     print(f"    {'ID':>3} {'Type':<8} {'Time':>7} {'Turns':>5} {'Tools':>5} "
-          f"{'PromptT':>8} {'CompT':>7} {'TotalT':>8} {'LLM':>7} {'Tool':>7} {'Fwk':>7}")
+          f"{'PID':>6} {'Thr':>4} {'LLM':>7} {'Tool':>7} {'Fwk':>7}")
     print(f"    {'─'*3} {'─'*8} {'─'*7} {'─'*5} {'─'*5} {'─'*8} {'─'*7} {'─'*8} {'─'*7} {'─'*7} {'─'*7}")
 
     for inst in sorted(instances, key=lambda x: x.get("instance_id", 0)):
@@ -160,9 +208,11 @@ def analyze_agent(filepath: str):
         llm_s = inst.get("total_llm_latency_ms", 0) / 1000
         tool_s = inst.get("total_tool_latency_ms", 0) / 1000
         fwk_s = inst.get("total_framework_latency_ms", 0) / 1000
+        pid = inst.get("pid", "-")
+        thr = inst.get("num_threads", "-")
         color = c(wtype)
         print(f"    {color}{iid:3d} {wtype:<8}{c('reset')} {lat:7.1f} {turns:5d} {tools:5d} "
-              f"{pt:8d} {ct:7d} {tt:8d} {llm_s:7.1f} {tool_s:7.1f} {fwk_s:7.1f}")
+              f"{pid:>6} {thr:>4} {llm_s:7.1f} {tool_s:7.1f} {fwk_s:7.1f}")
 
     # --- Turn-level latency heatmap ---
     print(f"\n  {c('bold')}▌ Turn-Level Latency Heatmap{c('reset')}")
@@ -422,6 +472,23 @@ def analyze_agent(filepath: str):
     print(f"      {c('framework')}Avg Framework : {avg_fwk_ms/1000:6.1f}s ({pct_f:4.1f}%){c('reset')}")
     print(f"    Avg Tool Calls     : {statistics.mean([i.get('total_tool_calls',0) for i in instances]):.1f}")
     print(f"    Avg Turns/Task     : {statistics.mean([i.get('num_turns',0) for i in instances]):.1f}")
+
+    glb_ctx2 = glb_data if isinstance(glb_data, dict) else {}
+    if glb_ctx2.get("total_processes") or any(i.get("num_threads") for i in instances):
+        total_procs = glb_ctx2.get("total_processes", len(instances))
+        total_threads = glb_ctx2.get("total_threads", 0) or sum(
+            i.get("num_threads", 0) for i in instances if isinstance(i.get("num_threads"), int))
+        total_vol_s = glb_ctx2.get("total_ctx_switches_vol", 0) or sum(
+            i.get("ctx_switches_vol", 0) for i in instances)
+        total_invol_s = glb_ctx2.get("total_ctx_switches_invol", 0) or sum(
+            i.get("ctx_switches_invol", 0) for i in instances)
+        print(f"    {c('bold')}Process Overhead:{c('reset')}")
+        print(f"      Mode            : {config.get('mode', 'coro')}")
+        print(f"      Processes       : {total_procs}")
+        print(f"      Total Threads   : {total_threads}")
+        print(f"      Ctx Switches    : {total_vol_s + total_invol_s:,} "
+              f"({(total_vol_s+total_invol_s)/max(1,dur):.0f}/sec)")
+
     print()
     sep("═")
     print()
