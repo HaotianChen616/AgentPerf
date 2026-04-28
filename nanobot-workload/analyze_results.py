@@ -170,6 +170,75 @@ def analyze_agent(filepath: str):
                 print(f"      {color}#{iid:2d} {wtype:<8}{c('reset')} "
                       f"{blk}{lgt} {nthr}")
 
+    # --- Memory Usage ---
+    has_mem = any(
+        isinstance(inst.get("rss_peak_mb"), (int, float)) and inst.get("rss_peak_mb", 0) > 0
+        or isinstance(inst.get("rss_mb"), (int, float)) and inst.get("rss_mb", 0) > 0
+        for inst in instances
+    )
+    if has_mem:
+        print(f"\n  {c('bold')}▌ Memory Usage{c('reset')}")
+
+        rss_data = []
+        for inst in sorted(instances, key=lambda x: x.get("instance_id", 0)):
+            rss = inst.get("rss_peak_mb", inst.get("rss_mb", 0))
+            vms = inst.get("vms_peak_mb", inst.get("vms_mb", 0))
+            if isinstance(rss, (int, float)) and rss > 0:
+                rss_data.append((inst, rss, vms))
+
+        if rss_data:
+            max_rss = max(r for _, r, _ in rss_data)
+            bar_w = 40
+
+            print(f"    {'ID':>3} {'Type':<8} {'RSS_peak':>8} {'RSS_avg':>8} {'VMS_peak':>8}  Bar")
+            print(f"    {'─'*3} {'─'*8} {'─'*8} {'─'*8} {'─'*8}  {'─'*bar_w}")
+
+            for inst, rss, vms in rss_data:
+                iid = inst.get("instance_id", "?")
+                wtype = inst.get("workload_type", "?")
+                rss_avg = inst.get("rss_avg_mb", 0)
+                color = c(wtype)
+                bar_n = min(int(rss / max(max_rss, 1) * bar_w), bar_w)
+                blk = chr(9608) * bar_n
+                lgt = chr(9617) * (bar_w - bar_n)
+                print(f"    {color}{iid:3d} {wtype:<8}{c('reset')} "
+                      f"{rss:8.1f} {rss_avg:8.1f} {vms:8.1f}  {blk}{lgt}")
+
+            all_rss = [r for _, r, _ in rss_data]
+            all_vms = [v for _, _, v in rss_data if isinstance(v, (int, float))]
+            print(f"\n    Total RSS       : {sum(all_rss):.1f} MB")
+            print(f"    Avg RSS/Proc    : {statistics.mean(all_rss):.1f} MB")
+            print(f"    Max RSS/Proc    : {max(all_rss):.1f} MB")
+            if all_vms:
+                print(f"    Total VMS       : {sum(all_vms):.1f} MB")
+                print(f"    Avg VMS/Proc    : {statistics.mean(all_vms):.1f} MB")
+
+        hot_vals = [i.get("mem_hot_kb", 0) for i in instances if isinstance(i.get("mem_hot_kb"), (int, float))]
+        warm_vals = [i.get("mem_warm_kb", 0) for i in instances if isinstance(i.get("mem_warm_kb"), (int, float))]
+        cold_vals = [i.get("mem_cold_kb", 0) for i in instances if isinstance(i.get("mem_cold_kb"), (int, float))]
+        if hot_vals and sum(hot_vals) > 0:
+            t_hot = sum(hot_vals)
+            t_warm = sum(warm_vals) if warm_vals else 0
+            t_cold = sum(cold_vals) if cold_vals else 0
+            t_all = t_hot + t_warm + t_cold
+            print(f"\n    Memory Hot/Warm/Cold (/proc/PID/smaps_rollup):")
+            print(f"      Hot  (private_dirty)  : {t_hot:>10,} KB ({t_hot/max(1,t_all)*100:5.1f}%)")
+            print(f"      Warm (private_clean)  : {t_warm:>10,} KB ({t_warm/max(1,t_all)*100:5.1f}%)")
+            print(f"      Cold (shared_*)       : {t_cold:>10,} KB ({t_cold/max(1,t_all)*100:5.1f}%)")
+
+            hot_bar_w = 35
+            h_n = min(int(t_hot / max(1, t_all) * hot_bar_w), hot_bar_w)
+            w_n = min(int(t_warm / max(1, t_all) * hot_bar_w), hot_bar_w - h_n)
+            c_n = hot_bar_w - h_n - w_n
+            print(f"      {chr(9608)*h_n}{chr(9618)*w_n}{chr(9617)*c_n}  Hot/Warm/Cold")
+
+        io_r = [i.get("io_read_bytes", 0) for i in instances if isinstance(i.get("io_read_bytes"), (int, float))]
+        io_w = [i.get("io_write_bytes", 0) for i in instances if isinstance(i.get("io_write_bytes"), (int, float))]
+        if io_r and sum(io_r) > 0:
+            print(f"\n    I/O Bytes:")
+            print(f"      Total Read  : {sum(io_r):>12,} bytes ({sum(io_r)/1024/1024:.1f} MB)")
+            print(f"      Total Write : {sum(io_w):>12,} bytes ({sum(io_w)/1024/1024:.1f} MB)")
+
     # --- Per-instance latency bar chart ---
     print(f"\n  {c('bold')}▌ Task Latency by Instance{c('reset')}")
     max_lat = max((i.get("total_latency_ms", 0) for i in instances), default=1)
