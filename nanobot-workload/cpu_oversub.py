@@ -722,9 +722,11 @@ class OversubscriptionTest:
         except Exception:
             pass
 
-        self._aggregate_and_save(completed, duration, len(tasks))
+        self._aggregate_and_save(completed, duration, len(tasks), perf_cache)
 
-    def _aggregate_and_save(self, completed, duration, num_tasks):
+    def _aggregate_and_save(self, completed, duration, num_tasks, perf_cache=None):
+        if perf_cache is None:
+            perf_cache = {}
         samples = self.monitor.cpu_samples
         cpu_avg = round(statistics.mean(samples), 2) if samples else 0
         cpu_max = round(max(samples), 2) if samples else 0
