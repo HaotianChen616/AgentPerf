@@ -294,7 +294,7 @@ async def main():
         _pid = os.getpid()
         while not _mem_stop.is_set():
             try:
-                with open(f"/proc/{_pid}/status") as _sf:
+                with open("/proc/self/status") as _sf:
                     for _line in _sf:
                         if _line.startswith("VmRSS:"):
                             _mem_samples["rss"].append(int(_line.split()[1]) * 1024)
@@ -323,7 +323,7 @@ async def main():
     total_fwk_run = max(0, run_ms - total_llm - total_tool)
 
     try:
-        with open(f"/proc/{os.getpid()}/status") as _sf:
+        with open("/proc/self/status") as _sf:
             _status = _sf.read()
         _vmrss = 0
         _vmhwm = 0
@@ -348,7 +348,7 @@ async def main():
         result_data["mem_error"] = f"{type(e).__name__}: {str(e)[:100]}"
 
     try:
-        with open(f"/proc/{os.getpid()}/smaps_rollup") as _sf:
+        with open("/proc/self/smaps_rollup") as _sf:
             _smaps = _sf.read()
         _private_dirty = 0
         _private_clean = 0
@@ -370,7 +370,7 @@ async def main():
         result_data["smaps_error"] = f"{type(e).__name__}: {str(e)[:100]}"
 
     try:
-        with open(f"/proc/{os.getpid()}/io") as _sf:
+        with open("/proc/self/io") as _sf:
             _io = _sf.read()
         for _line in _io.split("\n"):
             if _line.startswith("read_bytes:"):
