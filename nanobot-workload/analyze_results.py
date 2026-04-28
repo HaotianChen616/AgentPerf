@@ -216,21 +216,23 @@ def analyze_agent(filepath: str):
         hot_vals = [i.get("mem_hot_kb", 0) for i in instances if isinstance(i.get("mem_hot_kb"), (int, float))]
         warm_vals = [i.get("mem_warm_kb", 0) for i in instances if isinstance(i.get("mem_warm_kb"), (int, float))]
         cold_vals = [i.get("mem_cold_kb", 0) for i in instances if isinstance(i.get("mem_cold_kb"), (int, float))]
-        if hot_vals and sum(hot_vals) > 0:
+        if hot_vals:
             t_hot = sum(hot_vals)
             t_warm = sum(warm_vals) if warm_vals else 0
             t_cold = sum(cold_vals) if cold_vals else 0
             t_all = t_hot + t_warm + t_cold
             print(f"\n    Memory Hot/Warm/Cold (/proc/PID/smaps_rollup):")
-            print(f"      Hot  (private_dirty)  : {t_hot:>10,} KB ({t_hot/max(1,t_all)*100:5.1f}%)")
-            print(f"      Warm (private_clean)  : {t_warm:>10,} KB ({t_warm/max(1,t_all)*100:5.1f}%)")
-            print(f"      Cold (shared_*)       : {t_cold:>10,} KB ({t_cold/max(1,t_all)*100:5.1f}%)")
-
-            hot_bar_w = 35
-            h_n = min(int(t_hot / max(1, t_all) * hot_bar_w), hot_bar_w)
-            w_n = min(int(t_warm / max(1, t_all) * hot_bar_w), hot_bar_w - h_n)
-            c_n = hot_bar_w - h_n - w_n
-            print(f"      {chr(9608)*h_n}{chr(9618)*w_n}{chr(9617)*c_n}  Hot/Warm/Cold")
+            if t_all == 0:
+                print(f"      (all values 0 — sandbox/container may restrict smaps access)")
+            else:
+                print(f"      Hot  (private_dirty)  : {t_hot:>10,} KB ({t_hot/max(1,t_all)*100:5.1f}%)")
+                print(f"      Warm (private_clean)  : {t_warm:>10,} KB ({t_warm/max(1,t_all)*100:5.1f}%)")
+                print(f"      Cold (shared_*)       : {t_cold:>10,} KB ({t_cold/max(1,t_all)*100:5.1f}%)")
+                hot_bar_w = 35
+                h_n = min(int(t_hot / max(1, t_all) * hot_bar_w), hot_bar_w)
+                w_n = min(int(t_warm / max(1, t_all) * hot_bar_w), hot_bar_w - h_n)
+                c_n = hot_bar_w - h_n - w_n
+                print(f"      {chr(9608)*h_n}{chr(9618)*w_n}{chr(9617)*c_n}  Hot/Warm/Cold")
 
         io_r = [i.get("io_read_bytes", 0) for i in instances if isinstance(i.get("io_read_bytes"), (int, float))]
         io_w = [i.get("io_write_bytes", 0) for i in instances if isinstance(i.get("io_write_bytes"), (int, float))]
