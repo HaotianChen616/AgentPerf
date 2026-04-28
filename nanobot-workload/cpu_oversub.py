@@ -475,14 +475,14 @@ class OversubscriptionTest:
                 if not line or line.startswith("#") or "seconds" in line:
                     continue
                 parts = line.split(",")
-                if len(parts) >= 2:
+                if len(parts) >= 3:
                     try:
-                        val = int(parts[0].replace(",", "").strip())
+                        val = float(parts[1].strip())
                         event = parts[-1].strip()
-                        result[event] = val
-                    except ValueError:
+                        result[event] = result.get(event, 0) + val
+                    except (ValueError, IndexError):
                         pass
-        return result
+        return {k: int(v) for k, v in result.items()}
 
     def _collect_process_metrics(self, pid: int, proc_obj=None) -> dict:
         if not psutil:
@@ -557,8 +557,10 @@ class OversubscriptionTest:
                 ["perf", "stat", "-e", perf_events,
                  "-C", str(self.core_id), "-x", ",",
                  "-o", str(perf_output_file),
-                 "sleep", str(max(1, int(self.tasks_per_type * 5 + 120)))],
+                 "-I", "1000",
+                 "sleep", str(max(1, int(self.tasks_per_type * 5 + 300)))],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                preexec_fn=os.setsid,
             )
         except Exception:
             pass
@@ -708,8 +710,16 @@ class OversubscriptionTest:
 
         perf_cache = {}
         if perf_proc and perf_proc.poll() is None:
-            perf_proc.terminate()
-            perf_proc.wait(timeout=5)
+            try:
+                perf_proc.send_signal(signal.SIGINT)
+                perf_proc.wait(timeout=5)
+            except Exception:
+                try:
+                    os.killpg(os.getpgid(perf_proc.pid), signal.SIGINT)
+                    perf_proc.wait(timeout=3)
+                except Exception:
+                    perf_proc.terminate()
+                    perf_proc.wait(timeout=2)
         if perf_output_file.exists():
             try:
                 perf_cache = self._parse_perf_stat(perf_output_file)
