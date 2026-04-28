@@ -169,6 +169,51 @@ def analyze_agent(filepath: str):
                 lgt = chr(9617) * (thread_bar_w - bar_n)
                 print(f"      {color}#{iid:2d} {wtype:<8}{c('reset')} "
                       f"{blk}{lgt} {nthr}")
+    # --- Cache Performance ---
+    glb_cache = glb_ctx.get("cache_perf", {}) if isinstance(glb_ctx, dict) else {}
+    if glb_cache:
+        cr = glb_cache.get("cache-references", 0)
+        cm = glb_cache.get("cache-misses", 0)
+        l1l = glb_cache.get("L1-dcache-loads", 0)
+        l1m = glb_cache.get("L1-dcache-load-misses", 0)
+        l2a = glb_cache.get("armv8_pmuv3_0/l2d_cache/", 0)
+        l2r = glb_cache.get("armv8_pmuv3_0/l2d_cache_refill/", 0)
+        bus = glb_cache.get("armv8_pmuv3_0/bus_access/", 0)
+        mem = glb_cache.get("armv8_pmuv3_0/mem_access/", 0)
+
+        print(f"\n  {c('bold')}▌ Cache Performance{c('reset')}")
+        cache_miss_rate = cm / max(1, cr) * 100
+        l1_miss_rate = l1m / max(1, l1l) * 100
+        l2_miss_rate = l2r / max(1, l2a) * 100
+
+        print(f"    {'Event':<25} {'Count':>15} {'Miss Rate':>10}")
+        print(f"    {'─'*25} {'─'*15} {'─'*10}")
+        print(f"    {'Cache References':<25} {cr:>15,}")
+        print(f"    {'Cache Misses':<25} {cm:>15,} {cache_miss_rate:>9.2f}%")
+        print(f"    {'L1-dcache Loads':<25} {l1l:>15,}")
+        print(f"    {'L1-dcache Misses':<25} {l1m:>15,} {l1_miss_rate:>9.2f}%")
+        print(f"    {'L2 Cache Accesses':<25} {l2a:>15,}")
+        print(f"    {'L2 Cache Refills (miss)':<25} {l2r:>15,} {l2_miss_rate:>9.2f}%")
+        print(f"    {'Bus Accesses':<25} {bus:>15,}")
+        print(f"    {'Memory Accesses':<25} {mem:>15,}")
+
+        bar_w = 40
+        hit_n = min(int((100 - cache_miss_rate) / 100 * bar_w), bar_w)
+        miss_n = bar_w - hit_n
+        print(f"\n    Overall Cache: {chr(9608)*hit_n}{chr(9617)*miss_n}  Hit/Miss ({100-cache_miss_rate:.1f}%/{cache_miss_rate:.1f}%)")
+
+        l2_hit_n = min(int((100 - l2_miss_rate) / 100 * bar_w), bar_w)
+        l2_miss_n = bar_w - l2_hit_n
+        print(f"    L2 Cache:     {chr(9608)*l2_hit_n}{chr(9617)*l2_miss_n}  Hit/Miss ({100-l2_miss_rate:.1f}%/{l2_miss_rate:.1f}%)")
+
+        if cache_miss_rate > 10:
+            print(f"\n    {c('bold')}WARNING: Cache miss rate > 10% indicates severe cache contention!{c('reset')}")
+            print(f"    Multiple instances competing for L1 ({64}KB) and L2 ({512}KB) per core.")
+        elif cache_miss_rate > 5:
+            print(f"\n    {c('bold')}Moderate cache contention detected ({cache_miss_rate:.1f}% miss rate){c('reset')}")
+            print(f"    L2 ({512}KB) shared by {config.get('concurrency', 'N/A')} processes may cause evictions.")
+        else:
+            print(f"\n    Cache contention: LOW ({cache_miss_rate:.1f}% miss rate)")
 
     # --- Memory Usage ---
     has_mem = any(

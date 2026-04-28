@@ -467,6 +467,23 @@ class OversubscriptionTest:
         except Exception:
             return {"error": "Failed to read result file"}
 
+    def _parse_perf_stat(self, perf_file: Path) -> dict:
+        result = {}
+        with open(perf_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "seconds" in line:
+                    continue
+                parts = line.split(",")
+                if len(parts) >= 2:
+                    try:
+                        val = int(parts[0].replace(",", "").strip())
+                        event = parts[-1].strip()
+                        result[event] = val
+                    except ValueError:
+                        pass
+        return result
+
     def _collect_process_metrics(self, pid: int, proc_obj=None) -> dict:
         if not psutil:
             return {}
@@ -526,6 +543,26 @@ class OversubscriptionTest:
             f.write(WORKER_SCRIPT)
 
         self.monitor.start()
+
+        perf_events = (
+            "cache-references,cache-misses,"
+            "L1-dcache-loads,L1-dcache-load-misses,"
+            "armv8_pmuv3_0/l2d_cache/,armv8_pmuv3_0/l2d_cache_refill/,"
+            "armv8_pmuv3_0/bus_access/,armv8_pmuv3_0/mem_access/"
+        )
+        perf_proc = None
+        perf_output_file = BASE_DIR / "_perf_stat.txt"
+        try:
+            perf_proc = subprocess.Popen(
+                ["perf", "stat", "-e", perf_events,
+                 "-C", str(self.core_id), "-x", ",",
+                 "-o", str(perf_output_file),
+                 "sleep", str(max(1, int(self.tasks_per_type * 5 + 120)))],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        except Exception:
+            pass
+
         start_time = time.time()
 
         print(f"  Launching {len(tasks)} agent processes (max {self.concurrency} concurrent)...\n")
@@ -669,6 +706,17 @@ class OversubscriptionTest:
         duration = time.time() - start_time
         self.monitor.stop()
 
+        perf_cache = {}
+        if perf_proc and perf_proc.poll() is None:
+            perf_proc.terminate()
+            perf_proc.wait(timeout=5)
+        if perf_output_file.exists():
+            try:
+                perf_cache = self._parse_perf_stat(perf_output_file)
+                perf_output_file.unlink()
+            except Exception:
+                pass
+
         try:
             worker_script.unlink()
         except Exception:
@@ -707,6 +755,27 @@ class OversubscriptionTest:
         print(f"    Maximum : {cpu_max:>6.1f}%")
         print(f"    Minimum : {cpu_min:>6.1f}%")
         print(f"    StdDev  : {cpu_stddev:>6.1f}%")
+
+        if perf_cache:
+            print(f"\n  Cache Performance (core {self.core_id}):")
+            cr = perf_cache.get("cache-references", 0)
+            cm = perf_cache.get("cache-misses", 0)
+            l1l = perf_cache.get("L1-dcache-loads", 0)
+            l1m = perf_cache.get("L1-dcache-load-misses", 0)
+            l2a = perf_cache.get("armv8_pmuv3_0/l2d_cache/", 0)
+            l2r = perf_cache.get("armv8_pmuv3_0/l2d_cache_refill/", 0)
+            bus = perf_cache.get("armv8_pmuv3_0/bus_access/", 0)
+            mem = perf_cache.get("armv8_pmuv3_0/mem_access/", 0)
+            print(f"    Cache References  : {cr:>15,}")
+            print(f"    Cache Misses      : {cm:>15,}  ({cm/max(1,cr)*100:.2f}%)")
+            print(f"    L1-dcache Loads   : {l1l:>15,}")
+            print(f"    L1-dcache Misses  : {l1m:>15,}  ({l1m/max(1,l1l)*100:.2f}%)")
+            print(f"    L2 Cache Accesses : {l2a:>15,}")
+            print(f"    L2 Cache Refills  : {l2r:>15,}  ({l2r/max(1,l2a)*100:.2f}%)")
+            print(f"    Bus Accesses      : {bus:>15,}")
+            print(f"    Memory Accesses   : {mem:>15,}")
+            print(f"    Cache Miss Rate   : {cm/max(1,cr)*100:.2f}%  (higher = more contention)")
+            print(f"    L2 Miss Rate      : {l2r/max(1,l2a)*100:.2f}%  (higher = more L3/DRAM pressure)")
 
         print(f"\n  Process / Thread Overhead:")
         print(f"    Total Processes   : {len(completed)}")
@@ -818,6 +887,7 @@ class OversubscriptionTest:
                 "total_threads": total_threads,
                 "total_processes": len(completed),
                 "ctx_switches_per_sec": round((total_vol + total_invol) / max(1, duration), 1),
+                "cache_perf": perf_cache if perf_cache else {},
             },
             "per_instance": results,
         }
