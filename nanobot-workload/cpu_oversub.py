@@ -560,6 +560,11 @@ class OversubscriptionTest:
                         p.cpu_affinity([self.core_id])
                         running_procs[iid] = p
                         running_mem_samples[iid] = []
+                        try:
+                            mi = p.memory_info()
+                            running_mem_samples[iid].append({"rss_mb": round(mi.rss / 1024 / 1024, 1), "vms_mb": round(mi.vms / 1024 / 1024, 1)})
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                     running[iid] = proc
@@ -597,7 +602,7 @@ class OversubscriptionTest:
                         result_file = t[5]
                         break
 
-                proc_metrics = self._collect_process_metrics(proc.pid, running_procs.get(iid)) if proc.pid else {}
+                proc_metrics = {}
                 mem_samples = running_mem_samples.pop(iid, [])
                 if mem_samples:
                     rss_vals = [s["rss_mb"] for s in mem_samples]
@@ -606,6 +611,32 @@ class OversubscriptionTest:
                     proc_metrics["rss_avg_mb"] = round(statistics.mean(rss_vals), 1)
                     proc_metrics["vms_peak_mb"] = max(vms_vals)
                     proc_metrics["mem_samples"] = len(mem_samples)
+
+                try:
+                    proc_obj = running_procs.pop(iid, None)
+                    if proc_obj:
+                        ctx = proc_obj.num_ctx_switches()
+                        proc_metrics["num_threads"] = proc_obj.num_threads()
+                        proc_metrics["ctx_switches_vol"] = ctx.voluntary
+                        proc_metrics["ctx_switches_invol"] = ctx.involuntary
+                        try:
+                            mmaps = proc_obj.memory_maps(grouped=True)
+                            proc_metrics["mem_hot_kb"] = sum(getattr(m, 'private_dirty', 0) for m in mmaps)
+                            proc_metrics["mem_warm_kb"] = sum(getattr(m, 'private_clean', 0) for m in mmaps)
+                            proc_metrics["mem_cold_kb"] = sum(getattr(m, 'shared_clean', 0) + getattr(m, 'shared_dirty', 0) for m in mmaps)
+                        except Exception:
+                            pass
+                        try:
+                            with open(f"/proc/{proc_obj.pid}/io") as _iof:
+                                for _line in _iof:
+                                    if _line.startswith("read_bytes:"):
+                                        proc_metrics["io_read_bytes"] = int(_line.split()[1])
+                                    elif _line.startswith("write_bytes:"):
+                                        proc_metrics["io_write_bytes"] = int(_line.split()[1])
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 result_data = self._read_result(result_file) if result_file else {}
                 result_data.update(proc_metrics)
                 result_data["pid"] = proc.pid
