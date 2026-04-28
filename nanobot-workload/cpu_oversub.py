@@ -602,6 +602,8 @@ class OversubscriptionTest:
                         result_file = t[5]
                         break
 
+                result_data = self._read_result(result_file) if result_file else {}
+
                 proc_metrics = {}
                 mem_samples = running_mem_samples.pop(iid, [])
                 if mem_samples:
@@ -637,8 +639,10 @@ class OversubscriptionTest:
                             pass
                 except Exception:
                     pass
-                result_data = self._read_result(result_file) if result_file else {}
-                result_data.update(proc_metrics)
+
+                for k, v in proc_metrics.items():
+                    if k not in result_data or (isinstance(v, (int, float)) and v > 0):
+                        result_data[k] = v
                 result_data["pid"] = proc.pid
                 result_data["exit_code"] = proc.returncode
                 completed.append((iid, wtype, result_data))
