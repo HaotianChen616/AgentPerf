@@ -393,6 +393,69 @@ def analyze_agent(filepath: str):
             wt = inst.get("workload_type", "unknown")
             by_type_bd.setdefault(wt, []).append(inst)
 
+    # --- Framework Latency Decomposition ---
+    has_init = any(isinstance(inst.get("init_latency_ms"), (int, float)) for inst in instances)
+    has_gaps = any(inst.get("inter_turn_gaps_ms") for inst in instances)
+    if has_init or has_gaps:
+        print(f"\n  {c('bold')}▌ Framework Latency Decomposition{c('reset')}")
+        print(f"    Framework = Init + Inter-turn gaps (context governance, checkpoint, memory)")
+        print()
+        print(f"    {'ID':>3} {'Type':<8} {'Init':>7} {'Sum(gaps)':>10} {'Avg(gap)':>9} {'Max(gap)':>9} {'#gaps':>6} {'Fwk_run':>8}")
+        print(f"    {'─'*3} {'─'*8} {'─'*7} {'─'*10} {'─'*9} {'─'*9} {'─'*6} {'─'*8}")
+        all_init = []
+        all_gap_sums = []
+        for inst in sorted(instances, key=lambda x: x.get("instance_id", 0)):
+            iid = inst.get("instance_id", "?")
+            wtype = inst.get("workload_type", "?")
+            init_ms = inst.get("init_latency_ms", 0) or 0
+            gaps = inst.get("inter_turn_gaps_ms", [])
+            if not isinstance(gaps, list):
+                gaps = []
+            gap_sum = sum(gaps)
+            gap_avg = statistics.mean(gaps) if gaps else 0
+            gap_max = max(gaps) if gaps else 0
+            fwk_run = inst.get("framework_run_ms", 0) or 0
+            color = c(wtype)
+            print(f"    {color}{iid:3d} {wtype:<8}{c('reset')} "
+                  f"{init_ms:7.0f} {gap_sum:10.0f} {gap_avg:9.0f} {gap_max:9.0f} "
+                  f"{len(gaps):6d} {fwk_run:8.0f}")
+            if isinstance(init_ms, (int, float)) and init_ms > 0:
+                all_init.append(init_ms)
+            all_gap_sums.append(gap_sum)
+        if all_init or all_gap_sums:
+            print()
+            if all_init:
+                print(f"    Avg Init (Nanobot.from_config): {statistics.mean(all_init):.0f}ms")
+                print(f"      └─ config loading, provider init, tool registration, session manager")
+            if all_gap_sums:
+                print(f"    Avg Inter-turn gap sum: {statistics.mean(all_gap_sums):.0f}ms")
+                print(f"      ├─ _microcompact()    : compress old tool results")
+                print(f"      ├─ _snip_history()    : truncate messages by token estimate")
+                print(f"      ├─ estimate_tokens()  : tiktoken encoding for context window")
+                print(f"      ├─ _emit_checkpoint() : serialize session to disk (JSONL)")
+                print(f"      └─ _try_drain()       : check pending message injections")
+        if has_init:
+            init_vals = [inst.get("init_latency_ms", 0) or 0 for inst in instances if isinstance(inst.get("init_latency_ms", 0), (int, float))]
+            gap_vals = [sum(inst.get("inter_turn_gaps_ms", []) or []) for inst in instances]
+            fwk_run_vals = [inst.get("framework_run_ms", 0) or 0 for inst in instances if isinstance(inst.get("framework_run_ms", 0), (int, float))]
+            if init_vals and fwk_run_vals:
+                total_init = sum(init_vals)
+                total_gaps = sum(gap_vals)
+                total_fwk_run = sum(fwk_run_vals)
+                unaccounted = max(0, total_fwk_run - total_gaps)
+                total_all = total_init + total_gaps + unaccounted
+                if total_all > 0:
+                    print(f"\n    Framework Breakdown (aggregated):")
+                    print(f"      Init              : {total_init:>10,.0f}ms ({total_init/total_all*100:5.1f}%)")
+                    print(f"      Inter-turn gaps   : {total_gaps:>10,.0f}ms ({total_gaps/total_all*100:5.1f}%)")
+                    if unaccounted > 100:
+                        print(f"      Other (unaccounted): {unaccounted:>10,.0f}ms ({unaccounted/total_all*100:5.1f}%)")
+                    bar_w = 40
+                    i_n = min(int(total_init / total_all * bar_w), bar_w)
+                    g_n = min(int(total_gaps / total_all * bar_w), bar_w - i_n)
+                    u_n = bar_w - i_n - g_n
+                    print(f"      {chr(9608)*i_n}{chr(9618)*g_n}{chr(9617)*u_n}  Init/Gaps/Other")
+
         print(f"\n  {c('bold')}▌ Latency Breakdown by Workload Type{c('reset')}")
         print(f"    {'Type':<8} {'AvgLLM':>8} {'AvgTool':>8} {'AvgFwk':>8} {'AvgTotal':>8} "
               f"{'LLM%':>6} {'Tool%':>6} {'Fwk%':>6}")

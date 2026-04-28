@@ -200,11 +200,13 @@ class MetricsHook(AgentHook):
         self._t0 = 0.0
         self._t1 = 0.0
         self._has_tools = False
+        self._last_t2 = 0.0
         self.turns = []
         self.tool_calls_total = 0
         self.prompt_tokens_total = 0
         self.completion_tokens_total = 0
         self._turn_idx = 0
+        self.inter_turn_gaps = []
 
     def _now(self):
         return time.perf_counter()
@@ -213,6 +215,9 @@ class MetricsHook(AgentHook):
         self._t0 = self._now()
         self._t1 = 0.0
         self._has_tools = False
+        if self._last_t2 > 0:
+            gap_ms = (self._t0 - self._last_t2) * 1000
+            self.inter_turn_gaps.append(gap_ms)
 
     async def before_execute_tools(self, context):
         self._t1 = self._now()
@@ -220,6 +225,7 @@ class MetricsHook(AgentHook):
 
     async def after_iteration(self, context):
         t2 = self._now()
+        self._last_t2 = t2
         wall_ms = (t2 - self._t0) * 1000
         if self._has_tools and self._t1 > 0:
             llm_ms = (self._t1 - self._t0) * 1000
@@ -391,6 +397,7 @@ async def main():
         "total_tool_latency_ms": round(total_tool, 2),
         "total_framework_latency_ms": round(total_fwk_run + init_ms, 2),
         "framework_run_ms": round(total_fwk_run, 2),
+        "inter_turn_gaps_ms": [round(g, 2) for g in hook.inter_turn_gaps],
         "num_turns": len(hook.turns),
         "turns": hook.turns,
     })
