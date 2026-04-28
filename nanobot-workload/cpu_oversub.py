@@ -94,11 +94,104 @@ import time
 import traceback
 
 BASE_DIR = os.environ.get("NANOBOT_BASE_DIR", ".")
+MOCK_LLM = os.environ.get("NANOBOT_MOCK_LLM", "0") == "1"
+MOCK_DELAY_MS = int(os.environ.get("NANOBOT_MOCK_DELAY_MS", "50"))
+
 sys.path.insert(0, BASE_DIR)
 os.environ["HOME"] = BASE_DIR
 
 from nanobot import Nanobot
 from nanobot.agent.hook import AgentHook, AgentHookContext
+
+if MOCK_LLM:
+    from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest, GenerationSettings
+
+    class MockLLMProvider(LLMProvider):
+        """Mock LLM that returns scripted tool calls without network I/O."""
+
+        TOOL_SEQUENCES = {
+            "cpu": [
+                [ToolCallRequest(id="call_mock_0", name="write_file", arguments={"path": "workspace/mock_code.py", "content": "import sys\\nprint('mock cpu task')\\nfor i in range(1000): x=i**2"})],
+                [ToolCallRequest(id="call_mock_0", name="exec", arguments={"command": "python3 workspace/mock_code.py"})],
+                [ToolCallRequest(id="call_mock_0", name="read_file", arguments={"path": "workspace/mock_code.py"})],
+            ],
+            "io": [
+                [ToolCallRequest(id="call_mock_0", name="write_file", arguments={"path": "workspace/mock_data.txt", "content": "name,age,city\\nAlice,30,NYC\\nBob,25,LA\\nCarol,35,Chicago"})],
+                [ToolCallRequest(id="call_mock_0", name="read_file", arguments={"path": "workspace/mock_data.txt"})],
+                [ToolCallRequest(id="call_mock_0", name="exec", arguments={"command": "ls -la workspace/ && wc -l workspace/mock_data.txt"})],
+            ],
+            "network": [
+                [ToolCallRequest(id="call_mock_0", name="write_file", arguments={"path": "workspace/mock_search.md", "content": "# Mock Search Results\\n- Result 1: Python asyncio guide\\n- Result 2: Best practices"})],
+                [ToolCallRequest(id="call_mock_0", name="read_file", arguments={"path": "workspace/mock_search.md"})],
+                [ToolCallRequest(id="call_mock_0", name="exec", arguments={"command": "cat workspace/mock_search.md | grep -i python"})],
+            ],
+            "mixed": [
+                [ToolCallRequest(id="call_mock_0", name="write_file", arguments={"path": "workspace/mock_mixed.py", "content": "def quicksort(arr):\\n    if len(arr) <= 1: return arr\\n    pivot = arr[0]\\n    left = [x for x in arr[1:] if x <= pivot]\\n    right = [x for x in arr[1:] if x > pivot]\\n    return quicksort(left) + [pivot] + quicksort(right)"})],
+                [ToolCallRequest(id="call_mock_0", name="exec", arguments={"command": "python3 -c \\"from workspace.mock_mixed import quicksort; print(quicksort([3,1,4,1,5,9,2,6]))\\""})],
+                [ToolCallRequest(id="call_mock_0", name="read_file", arguments={"path": "workspace/mock_mixed.py"})],
+            ],
+        }
+
+        def __init__(self):
+            self._turn = 0
+            self._sequence = None
+            self._model = "mock-llm"
+            self.generation = GenerationSettings(max_tokens=2048, temperature=0.3)
+
+        def get_model(self):
+            return self._model
+
+        def get_default_model(self):
+            return self._model
+
+        async def chat(self, messages, tools=None, **kwargs):
+            await asyncio.sleep(MOCK_DELAY_MS / 1000)
+            self._turn += 1
+            if self._sequence is None:
+                for wt, seq in self.TOOL_SEQUENCES.items():
+                    for msg in messages:
+                        if wt in msg.get("content", "").lower():
+                            self._sequence = seq
+                            break
+                    if self._sequence:
+                        break
+                if self._sequence is None:
+                    self._sequence = self.TOOL_SEQUENCES["io"]
+
+            if self._turn <= len(self._sequence):
+                tool_calls = self._sequence[self._turn - 1]
+                return LLMResponse(
+                    content="",
+                    tool_calls=tool_calls,
+                    usage={"prompt_tokens": 800, "completion_tokens": 150},
+                    finish_reason="tool_calls",
+
+                )
+            return LLMResponse(
+                content="Task completed successfully. All operations finished.",
+                tool_calls=[],
+                usage={"prompt_tokens": 800, "completion_tokens": 100},
+                finish_reason="stop",
+
+            )
+
+        async def chat_stream(self, messages, tools=None, **kwargs):
+            result = await self.chat(messages, tools, **kwargs)
+            yield result
+
+        async def chat_with_retry(self, messages, tools=None, retry_mode="standard", on_retry_wait=None, **kwargs):
+            return await self.chat(messages, tools, **kwargs)
+
+        async def chat_stream_with_retry(self, messages, tools=None, on_content_delta=None, **kwargs):
+            result = await self.chat(messages, tools, **kwargs)
+            if on_content_delta and result.content:
+                await on_content_delta(result.content)
+            yield result
+
+        async def _safe_chat(self, **kwargs):
+            return await self.chat(**kwargs)
+
+        _SENTINEL = object()
 
 
 class MetricsHook(AgentHook):
@@ -172,11 +265,18 @@ async def main():
         "workload_type": workload_type,
         "task_prompt": task_prompt[:200],
         "pid": os.getpid(),
+        "mock_llm": MOCK_LLM,
     }
 
     t_init_start = time.perf_counter()
     try:
         bot = Nanobot.from_config(config_path=config_path)
+        if MOCK_LLM:
+            mock_provider = MockLLMProvider()
+            bot._loop.provider = mock_provider
+            bot._loop.runner.provider = mock_provider
+            import sys as _sys
+            print(f"  [MOCK] Provider replaced: {type(bot._loop.provider).__name__}", file=_sys.stderr)
     except Exception as e:
         result_data["error"] = f"InitError: {type(e).__name__}: {str(e)[:200]}"
         traceback.print_exc()
@@ -198,6 +298,29 @@ async def main():
     total_llm = sum(t["llm_latency_ms"] for t in hook.turns)
     total_tool = sum(t["tool_latency_ms"] for t in hook.turns)
     total_fwk_run = max(0, run_ms - total_llm - total_tool)
+
+    import psutil as _psutil
+    try:
+        _proc = _psutil.Process(os.getpid())
+        _mem = _proc.memory_info()
+        _ctx = _proc.num_ctx_switches()
+        result_data["rss_mb"] = round(_mem.rss / 1024 / 1024, 1)
+        result_data["vms_mb"] = round(_mem.vms / 1024 / 1024, 1)
+        result_data["num_threads"] = _proc.num_threads()
+        result_data["ctx_switches_vol"] = _ctx.voluntary
+        result_data["ctx_switches_invol"] = _ctx.involuntary
+        try:
+            _mmaps = _proc.memory_maps(grouped=True)
+            hot = sum(getattr(m, 'private_dirty', 0) for m in _mmaps)
+            warm = sum(getattr(m, 'private_clean', 0) for m in _mmaps)
+            cold = sum(getattr(m, 'shared_clean', 0) + getattr(m, 'shared_dirty', 0) for m in _mmaps)
+            result_data["mem_hot_kb"] = hot
+            result_data["mem_warm_kb"] = warm
+            result_data["mem_cold_kb"] = cold
+        except Exception:
+            pass
+    except Exception:
+        pass
 
     result_data.update({
         "total_latency_ms": round(elapsed_ms, 2),
@@ -229,11 +352,15 @@ class OversubscriptionTest:
         concurrency: int = 10,
         tasks_per_type: int = 3,
         task_types: Optional[List[str]] = None,
+        mock_llm: bool = False,
+        mock_delay_ms: int = 50,
     ):
         self.core_id = core_id
         self.concurrency = concurrency
         self.tasks_per_type = tasks_per_type
         self.task_types = task_types or ["cpu", "io", "network", "mixed"]
+        self.mock_llm = mock_llm
+        self.mock_delay_ms = mock_delay_ms
         self.monitor = CoreMonitor(core_id)
 
     def _pin_process(self):
@@ -301,6 +428,8 @@ class OversubscriptionTest:
         print(f"  Tasks/Type    : {self.tasks_per_type}")
         total = len(self.task_types) * self.tasks_per_type
         print(f"  Total Tasks   : {total}")
+        if self.mock_llm:
+            print(f"  Mock LLM      : ENABLED (delay={self.mock_delay_ms}ms)")
         print("=" * 78)
         print()
 
@@ -341,6 +470,9 @@ class OversubscriptionTest:
                 env["NANOBOT_BASE_DIR"] = str(BASE_DIR)
                 env["HOME"] = str(inst_dir)
                 env["PYTHONPATH"] = str(BASE_DIR)
+                if self.mock_llm:
+                    env["NANOBOT_MOCK_LLM"] = "1"
+                    env["NANOBOT_MOCK_DELAY_MS"] = str(self.mock_delay_ms)
                 try:
                     proc = subprocess.Popen(
                         [sys.executable, str(worker_script),
@@ -451,16 +583,17 @@ class OversubscriptionTest:
 
         print(f"\n  Per-Instance Results:")
         print(f"  {'ID':>3} {'Type':<8} {'Time(s)':>8} {'Turns':>5} {'Tools':>5} "
-              f"{'Thr':>4} {'PID':>6} {'LLM(s)':>7} {'Tool(s)':>7} {'Fwk(s)':>7} {'Error':<20}")
+              f"{'Thr':>4} {'PID':>6} {'RSS_MB':>7} {'LLM(s)':>7} {'Tool(s)':>7} {'Fwk(s)':>7} {'Error':<20}")
         print(f"  {'---':>3} {'--------':<8} {'--------':>8} {'-----':>5} {'-----':>5} "
-              f"{'----':>4} {'------':>6} {'-------':>7} {'-------':>7} {'-------':>7} {'--------------------':<20}")
+              f"{'----':>4} {'------':>6} {'-------':>7} {'-------':>7} {'-------':>7} {'-------':>7} {'--------------------':<20}")
 
         for r in results:
             err_display = r.get("error", "")[:20] if r.get("error") else ""
+            rss = r.get("rss_mb", "-")
             print(f"  {r['instance_id']:3d} {r['workload_type']:<8} "
                   f"{r.get('total_latency_ms',0)/1000:8.1f} {r.get('num_turns',0):5d} "
                   f"{r.get('total_tool_calls',0):5d} {r.get('num_threads','?'):>4} "
-                  f"{r.get('pid','?'):>6} "
+                  f"{r.get('pid','?'):>6} {rss:>7} "
                   f"{r.get('total_llm_latency_ms',0)/1000:7.1f} "
                   f"{r.get('total_tool_latency_ms',0)/1000:7.1f} "
                   f"{r.get('total_framework_latency_ms',0)/1000:7.1f} "
@@ -497,6 +630,30 @@ class OversubscriptionTest:
         print(f"\n  Total Tokens Consumed: {total_tok:,}")
         print(f"  Throughput: {len(results)/max(1,duration):.2f} tasks/sec")
 
+        rss_vals = [r.get("rss_mb", 0) for r in results if isinstance(r.get("rss_mb"), (int, float))]
+        vms_vals = [r.get("vms_mb", 0) for r in results if isinstance(r.get("vms_mb"), (int, float))]
+        if rss_vals:
+            print(f"\n  Memory Usage:")
+            print(f"    Avg RSS/Proc    : {statistics.mean(rss_vals):.1f} MB")
+            print(f"    Max RSS/Proc    : {max(rss_vals):.1f} MB")
+            print(f"    Total RSS       : {sum(rss_vals):.1f} MB")
+            if vms_vals:
+                print(f"    Avg VMS/Proc    : {statistics.mean(vms_vals):.1f} MB")
+                print(f"    Total VMS       : {sum(vms_vals):.1f} MB")
+
+        hot_vals = [r.get("mem_hot_kb", 0) for r in results if isinstance(r.get("mem_hot_kb"), (int, float))]
+        warm_vals = [r.get("mem_warm_kb", 0) for r in results if isinstance(r.get("mem_warm_kb"), (int, float))]
+        cold_vals = [r.get("mem_cold_kb", 0) for r in results if isinstance(r.get("mem_cold_kb"), (int, float))]
+        if hot_vals:
+            total_hot = sum(hot_vals)
+            total_warm = sum(warm_vals) if warm_vals else 0
+            total_cold = sum(cold_vals) if cold_vals else 0
+            total_all = total_hot + total_warm + total_cold
+            print(f"    Memory Hot/Warm/Cold (per-process /proc/PID/smaps):")
+            print(f"      Hot  (private_dirty)   : {total_hot:>10,} KB ({total_hot/max(1,total_all)*100:5.1f}%)")
+            print(f"      Warm (private_clean)   : {total_warm:>10,} KB ({total_warm/max(1,total_all)*100:5.1f}%)")
+            print(f"      Cold (shared_*)        : {total_cold:>10,} KB ({total_cold/max(1,total_all)*100:5.1f}%)")
+
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         result_path = RESULTS_DIR / f"oversub_agent_{timestamp}.json"
 
@@ -509,6 +666,8 @@ class OversubscriptionTest:
                 "num_instances": num_tasks,
                 "duration_sec": round(duration, 2),
                 "mode": "multiprocess",
+                "mock_llm": self.mock_llm,
+                "mock_delay_ms": self.mock_delay_ms if self.mock_llm else 0,
             },
             "global": {
                 "cpu_avg": cpu_avg,
@@ -537,6 +696,8 @@ def main():
     parser.add_argument("-n", "--concurrency", type=int, default=10, help="Max concurrent processes (default: 10)")
     parser.add_argument("-t", "--tasks-per-type", type=int, default=3, help="Tasks per workload type (default: 3)")
     parser.add_argument("--types", type=str, default="cpu,io,network,mixed", help="Workload types (comma-separated)")
+    parser.add_argument("--mock-llm", action="store_true", help="Mock LLM (no network I/O, isolate CPU overhead)")
+    parser.add_argument("--mock-delay", type=int, default=50, help="Mock LLM delay per turn in ms (default: 50)")
     args = parser.parse_args()
 
     task_types = [t.strip() for t in args.types.split(",") if t.strip()]
@@ -545,6 +706,8 @@ def main():
         concurrency=args.concurrency,
         tasks_per_type=args.tasks_per_type,
         task_types=task_types,
+        mock_llm=args.mock_llm,
+        mock_delay_ms=args.mock_delay,
     )
     test.run()
 
