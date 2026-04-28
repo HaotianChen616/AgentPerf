@@ -475,11 +475,20 @@ class OversubscriptionTest:
                 if not line or line.startswith("#") or "seconds" in line:
                     continue
                 parts = line.split(",")
-                if len(parts) >= 3:
+                if len(parts) >= 4:
                     try:
                         val = float(parts[1].strip())
-                        event = parts[-1].strip()
-                        result[event] = result.get(event, 0) + val
+                        event = parts[3].strip()
+                        if event and val > 0:
+                            result[event] = result.get(event, 0) + val
+                    except (ValueError, IndexError):
+                        pass
+                elif len(parts) >= 2 and "<not supported>" not in line:
+                    try:
+                        val = float(parts[0].strip().replace(" ", ""))
+                        event = parts[1].strip()
+                        if event and val > 0:
+                            result[event] = result.get(event, 0) + val
                     except (ValueError, IndexError):
                         pass
         return {k: int(v) for k, v in result.items()}
