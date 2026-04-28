@@ -286,12 +286,35 @@ async def main():
     init_ms = (time.perf_counter() - t_init_start) * 1000
 
     t_run_start = time.perf_counter()
+    import threading as _threading
+    _mem_samples = {"rss": [], "vms": []}
+    _mem_stop = _threading.Event()
+
+    def _sample_mem():
+        _pid = os.getpid()
+        while not _mem_stop.is_set():
+            try:
+                with open(f"/proc/{_pid}/status") as _sf:
+                    for _line in _sf:
+                        if _line.startswith("VmRSS:"):
+                            _mem_samples["rss"].append(int(_line.split()[1]) * 1024)
+                        elif _line.startswith("VmSize:"):
+                            _mem_samples["vms"].append(int(_line.split()[1]) * 1024)
+            except Exception:
+                pass
+            _mem_stop.wait(0.5)
+
+    _mem_thread = _threading.Thread(target=_sample_mem, daemon=True)
+    _mem_thread.start()
+
     try:
         result = await bot.run(task_prompt, session_key=f"oversub:{instance_id}", hooks=[hook])
         result_data["response_preview"] = result.content[:500] if result.content else ""
     except Exception as e:
         result_data["error"] = f"{type(e).__name__}: {str(e)[:200]}"
         traceback.print_exc()
+    _mem_stop.set()
+    _mem_thread.join(timeout=2)
     run_ms = (time.perf_counter() - t_run_start) * 1000
     elapsed_ms = init_ms + run_ms
 
@@ -299,26 +322,61 @@ async def main():
     total_tool = sum(t["tool_latency_ms"] for t in hook.turns)
     total_fwk_run = max(0, run_ms - total_llm - total_tool)
 
-    import psutil as _psutil
     try:
-        _proc = _psutil.Process(os.getpid())
-        _mem = _proc.memory_info()
-        _ctx = _proc.num_ctx_switches()
-        result_data["rss_mb"] = round(_mem.rss / 1024 / 1024, 1)
-        result_data["vms_mb"] = round(_mem.vms / 1024 / 1024, 1)
-        result_data["num_threads"] = _proc.num_threads()
-        result_data["ctx_switches_vol"] = _ctx.voluntary
-        result_data["ctx_switches_invol"] = _ctx.involuntary
-        try:
-            _mmaps = _proc.memory_maps(grouped=True)
-            hot = sum(getattr(m, 'private_dirty', 0) for m in _mmaps)
-            warm = sum(getattr(m, 'private_clean', 0) for m in _mmaps)
-            cold = sum(getattr(m, 'shared_clean', 0) + getattr(m, 'shared_dirty', 0) for m in _mmaps)
-            result_data["mem_hot_kb"] = hot
-            result_data["mem_warm_kb"] = warm
-            result_data["mem_cold_kb"] = cold
-        except Exception:
-            pass
+        with open(f"/proc/{os.getpid()}/status") as _sf:
+            _status = _sf.read()
+        _vmrss = 0
+        _vmhwm = 0
+        _threads = 0
+        for _line in _status.split("\n"):
+            if _line.startswith("VmRSS:"):
+                _vmrss = int(_line.split()[1])
+            elif _line.startswith("VmHWM:"):
+                _vmhwm = int(_line.split()[1])
+            elif _line.startswith("Threads:"):
+                _threads = int(_line.split()[1])
+        rss_peak_mb = round(max(_mem_samples["rss"]) / 1024 / 1024, 1) if _mem_samples["rss"] else round(_vmrss / 1024, 1)
+        rss_avg_mb = round(sum(_mem_samples["rss"]) / max(1, len(_mem_samples["rss"])) / 1024 / 1024, 1) if _mem_samples["rss"] else 0
+        vms_peak_mb = round(max(_mem_samples["vms"]) / 1024 / 1024, 1) if _mem_samples["vms"] else 0
+        result_data["rss_mb"] = rss_peak_mb
+        result_data["rss_avg_mb"] = rss_avg_mb
+        result_data["vms_mb"] = vms_peak_mb
+        result_data["rss_hwm_mb"] = round(_vmhwm / 1024, 1)
+        result_data["num_threads"] = _threads
+        result_data["rss_final_kb"] = _vmrss
+    except Exception as e:
+        result_data["mem_error"] = f"{type(e).__name__}: {str(e)[:100]}"
+
+    try:
+        with open(f"/proc/{os.getpid()}/smaps_rollup") as _sf:
+            _smaps = _sf.read()
+        _private_dirty = 0
+        _private_clean = 0
+        _shared_clean = 0
+        _shared_dirty = 0
+        for _line in _smaps.split("\n"):
+            if _line.startswith("Private_Dirty:"):
+                _private_dirty += int(_line.split()[1])
+            elif _line.startswith("Private_Clean:"):
+                _private_clean += int(_line.split()[1])
+            elif _line.startswith("Shared_Clean:"):
+                _shared_clean += int(_line.split()[1])
+            elif _line.startswith("Shared_Dirty:"):
+                _shared_dirty += int(_line.split()[1])
+        result_data["mem_hot_kb"] = _private_dirty
+        result_data["mem_warm_kb"] = _private_clean
+        result_data["mem_cold_kb"] = _shared_clean + _shared_dirty
+    except Exception as e:
+        result_data["smaps_error"] = f"{type(e).__name__}: {str(e)[:100]}"
+
+    try:
+        with open(f"/proc/{os.getpid()}/io") as _sf:
+            _io = _sf.read()
+        for _line in _io.split("\n"):
+            if _line.startswith("read_bytes:"):
+                result_data["io_read_bytes"] = int(_line.split()[1])
+            elif _line.startswith("write_bytes:"):
+                result_data["io_write_bytes"] = int(_line.split()[1])
     except Exception:
         pass
 
@@ -402,17 +460,31 @@ class OversubscriptionTest:
         except Exception:
             return {"error": "Failed to read result file"}
 
-    def _collect_process_metrics(self, pid: int) -> dict:
+    def _collect_process_metrics(self, pid: int, proc_obj=None) -> dict:
         if not psutil:
             return {}
         try:
-            proc = psutil.Process(pid)
+            if proc_obj is None:
+                proc = psutil.Process(pid)
+            else:
+                proc = proc_obj
+            mem = proc.memory_info()
             ctx = proc.num_ctx_switches()
-            return {
+            result = {
                 "num_threads": proc.num_threads(),
                 "ctx_switches_vol": ctx.voluntary,
                 "ctx_switches_invol": ctx.involuntary,
+                "rss_mb": round(mem.rss / 1024 / 1024, 1),
+                "vms_mb": round(mem.vms / 1024 / 1024, 1),
             }
+            try:
+                mmaps = proc.memory_maps(grouped=True)
+                result["mem_hot_kb"] = sum(getattr(m, 'private_dirty', 0) for m in mmaps)
+                result["mem_warm_kb"] = sum(getattr(m, 'private_clean', 0) for m in mmaps)
+                result["mem_cold_kb"] = sum(getattr(m, 'shared_clean', 0) + getattr(m, 'shared_dirty', 0) for m in mmaps)
+            except Exception:
+                pass
+            return result
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return {}
 
@@ -452,6 +524,8 @@ class OversubscriptionTest:
         print(f"  Launching {len(tasks)} agent processes (max {self.concurrency} concurrent)...\n")
 
         running: Dict[int, subprocess.Popen] = {}
+        running_procs: Dict[int, psutil.Process] = {}
+        running_mem_samples: Dict[int, List[dict]] = {}
         pending: List[Tuple[int, str, str, str, str, str]] = []
         completed: List[Tuple[int, str, dict]] = []
 
@@ -484,6 +558,8 @@ class OversubscriptionTest:
                     try:
                         p = psutil.Process(proc.pid)
                         p.cpu_affinity([self.core_id])
+                        running_procs[iid] = p
+                        running_mem_samples[iid] = []
                     except Exception:
                         pass
                     running[iid] = proc
@@ -499,6 +575,16 @@ class OversubscriptionTest:
             for iid, proc in list(running.items()):
                 if proc.poll() is not None:
                     finished.append(iid)
+                elif iid in running_procs:
+                    try:
+                        p = running_procs[iid]
+                        mi = p.memory_info()
+                        running_mem_samples[iid].append({
+                            "rss_mb": round(mi.rss / 1024 / 1024, 1),
+                            "vms_mb": round(mi.vms / 1024 / 1024, 1),
+                        })
+                    except Exception:
+                        pass
 
             for iid in finished:
                 proc = running.pop(iid)
@@ -511,7 +597,15 @@ class OversubscriptionTest:
                         result_file = t[5]
                         break
 
-                proc_metrics = self._collect_process_metrics(proc.pid) if proc.pid else {}
+                proc_metrics = self._collect_process_metrics(proc.pid, running_procs.get(iid)) if proc.pid else {}
+                mem_samples = running_mem_samples.pop(iid, [])
+                if mem_samples:
+                    rss_vals = [s["rss_mb"] for s in mem_samples]
+                    vms_vals = [s["vms_mb"] for s in mem_samples]
+                    proc_metrics["rss_peak_mb"] = max(rss_vals)
+                    proc_metrics["rss_avg_mb"] = round(statistics.mean(rss_vals), 1)
+                    proc_metrics["vms_peak_mb"] = max(vms_vals)
+                    proc_metrics["mem_samples"] = len(mem_samples)
                 result_data = self._read_result(result_file) if result_file else {}
                 result_data.update(proc_metrics)
                 result_data["pid"] = proc.pid
@@ -630,8 +724,10 @@ class OversubscriptionTest:
         print(f"\n  Total Tokens Consumed: {total_tok:,}")
         print(f"  Throughput: {len(results)/max(1,duration):.2f} tasks/sec")
 
-        rss_vals = [r.get("rss_mb", 0) for r in results if isinstance(r.get("rss_mb"), (int, float))]
-        vms_vals = [r.get("vms_mb", 0) for r in results if isinstance(r.get("vms_mb"), (int, float))]
+        rss_vals = [r.get("rss_peak_mb", r.get("rss_mb", 0)) for r in results
+                    if isinstance(r.get("rss_peak_mb"), (int, float)) or isinstance(r.get("rss_mb"), (int, float))]
+        vms_vals = [r.get("vms_peak_mb", r.get("vms_mb", 0)) for r in results
+                    if isinstance(r.get("vms_peak_mb"), (int, float)) or isinstance(r.get("vms_mb"), (int, float))]
         if rss_vals:
             print(f"\n  Memory Usage:")
             print(f"    Avg RSS/Proc    : {statistics.mean(rss_vals):.1f} MB")
@@ -644,7 +740,7 @@ class OversubscriptionTest:
         hot_vals = [r.get("mem_hot_kb", 0) for r in results if isinstance(r.get("mem_hot_kb"), (int, float))]
         warm_vals = [r.get("mem_warm_kb", 0) for r in results if isinstance(r.get("mem_warm_kb"), (int, float))]
         cold_vals = [r.get("mem_cold_kb", 0) for r in results if isinstance(r.get("mem_cold_kb"), (int, float))]
-        if hot_vals:
+        if hot_vals and sum(hot_vals) > 0:
             total_hot = sum(hot_vals)
             total_warm = sum(warm_vals) if warm_vals else 0
             total_cold = sum(cold_vals) if cold_vals else 0
