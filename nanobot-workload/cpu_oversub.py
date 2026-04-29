@@ -334,6 +334,8 @@ async def main():
         _vmrss = 0
         _vmhwm = 0
         _threads = 0
+        _ctx_vol = 0
+        _ctx_invol = 0
         for _line in _status.split("\n"):
             if _line.startswith("VmRSS:"):
                 _vmrss = int(_line.split()[1])
@@ -341,6 +343,10 @@ async def main():
                 _vmhwm = int(_line.split()[1])
             elif _line.startswith("Threads:"):
                 _threads = int(_line.split()[1])
+            elif _line.startswith("voluntary_ctxt_switches:"):
+                _ctx_vol = int(_line.split()[1])
+            elif _line.startswith("nonvoluntary_ctxt_switches:"):
+                _ctx_invol = int(_line.split()[1])
         rss_peak_mb = round(max(_mem_samples["rss"]) / 1024 / 1024, 1) if _mem_samples["rss"] else round(_vmrss / 1024, 1)
         rss_avg_mb = round(sum(_mem_samples["rss"]) / max(1, len(_mem_samples["rss"])) / 1024 / 1024, 1) if _mem_samples["rss"] else 0
         vms_peak_mb = round(max(_mem_samples["vms"]) / 1024 / 1024, 1) if _mem_samples["vms"] else 0
@@ -350,6 +356,8 @@ async def main():
         result_data["rss_hwm_mb"] = round(_vmhwm / 1024, 1)
         result_data["num_threads"] = _threads
         result_data["rss_final_kb"] = _vmrss
+        result_data["ctx_switches_vol"] = _ctx_vol
+        result_data["ctx_switches_invol"] = _ctx_invol
     except Exception as e:
         result_data["mem_error"] = f"{type(e).__name__}: {str(e)[:100]}"
 
@@ -671,11 +679,15 @@ class OversubscriptionTest:
 
                 try:
                     proc_obj = running_procs.pop(iid, None)
-                    if proc_obj:
-                        ctx = proc_obj.num_ctx_switches()
+                    if proc_obj and proc_obj.is_running():
+                        try:
+                            ctx = proc_obj.num_ctx_switches()
+                            if "ctx_switches_vol" not in result_data:
+                                proc_metrics["ctx_switches_vol"] = ctx.voluntary
+                                proc_metrics["ctx_switches_invol"] = ctx.involuntary
+                        except Exception:
+                            pass
                         proc_metrics["num_threads"] = proc_obj.num_threads()
-                        proc_metrics["ctx_switches_vol"] = ctx.voluntary
-                        proc_metrics["ctx_switches_invol"] = ctx.involuntary
                         try:
                             mmaps = proc_obj.memory_maps(grouped=True)
                             proc_metrics["mem_hot_kb"] = sum(getattr(m, 'private_dirty', 0) for m in mmaps)

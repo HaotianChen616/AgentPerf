@@ -747,6 +747,187 @@ def analyze_simulation(filepath: str):
 # Multi-file comparison
 # ---------------------------------------------------------------------------
 
+def _safe_mean(vals):
+    return statistics.mean(vals) if vals else 0
+
+def _pct_change(old, new):
+    if old == 0:
+        return "N/A" if new == 0 else "+inf"
+    return f"{(new - old) / old * 100:+.1f}%"
+
+def _fmt_delta(old, new, unit=""):
+    delta = new - old
+    pct = _pct_change(old, new)
+    return f"{old:,.1f}{unit} → {new:,.1f}{unit}  ({pct})"
+
+def compare_baseline(bl_data, os_data, bl_file, os_file):
+    bl_cfg = bl_data.get("test_config", {})
+    os_cfg = os_data.get("test_config", {})
+    bl_glb = bl_data.get("global", {})
+    os_glb = os_data.get("global", {})
+    bl_inst = bl_data.get("per_instance", [])
+    os_inst = os_data.get("per_instance", [])
+
+    print()
+    sep("═")
+    print(f"  {'B':>6} = Baseline  (1 instance, no contention)")
+    print(f"  {'O':>6} = Oversub   ({os_cfg.get('concurrency','?')} instances, CPU oversubscribed)")
+    print(f"  {'Δ':>6} = Delta     (oversub - baseline)")
+    sep("═")
+
+    bl_dur = bl_cfg.get("duration_sec", 0)
+    os_dur = os_cfg.get("duration_sec", 0)
+    bl_n = len(bl_inst)
+    os_n = len(os_inst)
+
+    print(f"\n  Baseline : {bl_n} instances, {bl_dur:.1f}s, core {bl_cfg.get('core_id','?')}")
+    print(f"  Oversub  : {os_n} instances, {os_dur:.1f}s, core {os_cfg.get('core_id','?')}")
+
+    # CPU
+    print(f"\n  {'─'*60}")
+    print(f"  CPU Utilization")
+    print(f"  {'─'*60}")
+    print(f"    B: {bl_glb.get('cpu_avg',0):.1f}%")
+    print(f"    O: {os_glb.get('cpu_avg',0):.1f}%")
+    print(f"    Δ: {_pct_change(bl_glb.get('cpu_avg',0), os_glb.get('cpu_avg',0))}")
+
+    # Cache
+    bl_cache = bl_glb.get("cache_perf", {})
+    os_cache = os_glb.get("cache_perf", {})
+    if bl_cache or os_cache:
+        print(f"\n  {'─'*60}")
+        print(f"  Cache Performance")
+        print(f"  {'─'*60}")
+        events = [
+            ("cache-references", "Cache Refs"),
+            ("cache-misses", "Cache Misses"),
+            ("L1-dcache-loads", "L1 Loads"),
+            ("L1-dcache-load-misses", "L1 Misses"),
+            ("armv8_pmuv3_0/l2d_cache/", "L2 Accesses"),
+            ("armv8_pmuv3_0/l2d_cache_refill/", "L2 Refills"),
+            ("armv8_pmuv3_0/bus_access/", "Bus Access"),
+            ("armv8_pmuv3_0/mem_access/", "Mem Access"),
+        ]
+        print(f"    {'Event':<20} {'Baseline':>14} {'Oversub':>14} {'Δ%':>10} {'Per-Inst B':>12} {'Per-Inst O':>12}")
+        print(f"    {'─'*20} {'─'*14} {'─'*14} {'─'*10} {'─'*12} {'─'*12}")
+        for evt_key, evt_name in events:
+            bv = bl_cache.get(evt_key, 0)
+            ov = os_cache.get(evt_key, 0)
+            bv_pi = bv / max(1, bl_n)
+            ov_pi = ov / max(1, os_n)
+            pct = _pct_change(bv, ov)
+            print(f"    {evt_name:<20} {bv:>14,} {ov:>14,} {pct:>10} {bv_pi:>12,.0f} {ov_pi:>12,.0f}")
+
+        # Miss rates
+        bl_cr = bl_cache.get("cache-references", 0)
+        bl_cm = bl_cache.get("cache-misses", 0)
+        os_cr = os_cache.get("cache-references", 0)
+        os_cm = os_cache.get("cache-misses", 0)
+        bl_miss = bl_cm / max(1, bl_cr) * 100
+        os_miss = os_cm / max(1, os_cr) * 100
+        bl_l2a = bl_cache.get("armv8_pmuv3_0/l2d_cache/", 0)
+        bl_l2r = bl_cache.get("armv8_pmuv3_0/l2d_cache_refill/", 0)
+        os_l2a = os_cache.get("armv8_pmuv3_0/l2d_cache/", 0)
+        os_l2r = os_cache.get("armv8_pmuv3_0/l2d_cache_refill/", 0)
+        bl_l2_miss = bl_l2r / max(1, bl_l2a) * 100
+        os_l2_miss = os_l2r / max(1, os_l2a) * 100
+
+        print(f"\n    Overall Cache Miss Rate: B={bl_miss:.2f}%  O={os_miss:.2f}%  Δ={os_miss-bl_l2_miss:+.2f}pp")
+        print(f"    L2 Cache Miss Rate:     B={bl_l2_miss:.2f}%  O={os_l2_miss:.2f}%  Δ={os_l2_miss-bl_l2_miss:+.2f}pp")
+
+        bar_w = 40
+        for label, b_miss, o_miss in [("Overall", bl_miss, os_miss), ("L2", bl_l2_miss, os_l2_miss)]:
+            b_hit_n = min(int((100 - b_miss) / 100 * bar_w), bar_w)
+            o_hit_n = min(int((100 - o_miss) / 100 * bar_w), bar_w)
+            print(f"    B {label}: {chr(9608)*b_hit_n}{chr(9617)*(bar_w-b_hit_n)}  {100-b_miss:.1f}% hit")
+            print(f"    O {label}: {chr(9608)*o_hit_n}{chr(9617)*(bar_w-o_hit_n)}  {100-o_miss:.1f}% hit")
+
+    # Context switches
+    print(f"\n  {'─'*60}")
+    print(f"  Context Switches")
+    print(f"  {'─'*60}")
+    bl_vol = bl_glb.get("total_ctx_switches_vol", 0)
+    bl_invol = bl_glb.get("total_ctx_switches_invol", 0)
+    os_vol = os_glb.get("total_ctx_switches_vol", 0)
+    os_invol = os_glb.get("total_ctx_switches_invol", 0)
+    bl_total = bl_vol + bl_invol
+    os_total = os_vol + os_invol
+    bl_per_s = bl_total / max(1, bl_dur)
+    os_per_s = os_total / max(1, os_dur)
+    bl_per_inst = bl_total / max(1, bl_n)
+    os_per_inst = os_total / max(1, os_n)
+    print(f"    Total:   B={bl_total:>15,}  O={os_total:>15,}  {_pct_change(bl_total, os_total)}")
+    print(f"    Per-sec: B={bl_per_s:>15,.0f}  O={os_per_s:>15,.0f}  {_pct_change(bl_per_s, os_per_s)}")
+    print(f"    Per-inst:B={bl_per_inst:>15,.0f}  O={os_per_inst:>15,.0f}  {_pct_change(bl_per_inst, os_per_inst)}")
+    print(f"    Voluntary:   B={bl_vol:>12,}  O={os_vol:>12,}")
+    print(f"    Involuntary: B={bl_invol:>12,}  O={os_invol:>12,}")
+
+    # Memory
+    print(f"\n  {'─'*60}")
+    print(f"  Memory")
+    print(f"  {'─'*60}")
+    bl_rss = [i.get("rss_peak_mb", i.get("rss_mb", 0)) for i in bl_inst if isinstance(i.get("rss_peak_mb", i.get("rss_mb", 0)), (int, float)) and (i.get("rss_peak_mb", i.get("rss_mb", 0)) or 0) > 0]
+    os_rss = [i.get("rss_peak_mb", i.get("rss_mb", 0)) for i in os_inst if isinstance(i.get("rss_peak_mb", i.get("rss_mb", 0)), (int, float)) and (i.get("rss_peak_mb", i.get("rss_mb", 0)) or 0) > 0]
+    if bl_rss and os_rss:
+        print(f"    Avg RSS/Proc: B={_safe_mean(bl_rss):.1f}MB  O={_safe_mean(os_rss):.1f}MB  {_pct_change(_safe_mean(bl_rss), _safe_mean(os_rss))}")
+        print(f"    Total RSS:    B={sum(bl_rss):.1f}MB  O={sum(os_rss):.1f}MB  {_pct_change(sum(bl_rss), sum(os_rss))}")
+    else:
+        print(f"    (memory data not available — run on real server, not sandbox)")
+
+    # Latency
+    print(f"\n  {'─'*60}")
+    print(f"  Latency")
+    print(f"  {'─'*60}")
+    bl_lats = [i.get("total_latency_ms", 0) for i in bl_inst]
+    os_lats = [i.get("total_latency_ms", 0) for i in os_inst]
+    bl_llm = _safe_mean([i.get("total_llm_latency_ms", 0) for i in bl_inst])
+    os_llm = _safe_mean([i.get("total_llm_latency_ms", 0) for i in os_inst])
+    bl_tool = _safe_mean([i.get("total_tool_latency_ms", 0) for i in bl_inst])
+    os_tool = _safe_mean([i.get("total_tool_latency_ms", 0) for i in os_inst])
+    bl_fwk = _safe_mean([i.get("total_framework_latency_ms", 0) for i in bl_inst])
+    os_fwk = _safe_mean([i.get("total_framework_latency_ms", 0) for i in os_inst])
+    bl_total_lat = _safe_mean(bl_lats)
+    os_total_lat = _safe_mean(os_lats)
+    print(f"    Avg Total:  B={bl_total_lat/1000:.1f}s  O={os_total_lat/1000:.1f}s  {_pct_change(bl_total_lat, os_total_lat)}")
+    print(f"    Avg LLM:    B={bl_llm/1000:.2f}s  O={os_llm/1000:.2f}s  {_pct_change(bl_llm, os_llm)}")
+    print(f"    Avg Tool:   B={bl_tool/1000:.2f}s  O={os_tool/1000:.2f}s  {_pct_change(bl_tool, os_tool)}")
+    print(f"    Avg Fwk:    B={bl_fwk/1000:.2f}s  O={os_fwk/1000:.2f}s  {_pct_change(bl_fwk, os_fwk)}")
+
+    # Judgment
+    print(f"\n  {'─'*60}")
+    print(f"  Contention Assessment")
+    print(f"  {'─'*60}")
+    print(f"    Reference thresholds (typical for Agent workloads on ARM):")
+    print(f"      Cache miss rate: <5% good, 5-15% moderate, >15% high contention")
+    print(f"      Ctx switches/sec per instance: <500 good, 500-5K moderate, >5K high")
+    print(f"      Latency increase vs baseline: <10% good, 10-30% moderate, >30% high")
+    issues = []
+    if os_cache:
+        if os_miss > bl_miss + 2:
+            issues.append(f"Cache miss rate increased by {os_miss-bl_miss:.1f}pp → L1/L2 cache contention")
+        if os_l2_miss > bl_l2_miss + 3:
+            issues.append(f"L2 miss rate {os_l2_miss:.1f}% (baseline {bl_l2_miss:.1f}%) → processes evicting each other's L2 lines")
+    os_per_inst_per_sec = os_per_inst / max(1, os_dur)
+    bl_per_inst_per_sec = bl_per_inst / max(1, bl_dur)
+    if os_per_inst > bl_per_inst * 2 and os_per_inst_per_sec > 500:
+        issues.append(f"Ctx switches per instance {os_per_inst:,.0f} vs baseline {bl_per_inst:,.0f} → excessive scheduling overhead")
+    elif os_per_inst_per_sec > 5000:
+        issues.append(f"Ctx switches {os_per_inst_per_sec:,.0f}/sec/inst → high scheduling overhead")
+    lat_increase = (os_total_lat - bl_total_lat) / max(1, bl_total_lat) * 100
+    if lat_increase > 20:
+        issues.append(f"Latency increased {lat_increase:.0f}% → CPU saturation causing task queuing")
+
+    if not issues:
+        print(f"    ✅ No significant contention detected")
+        print(f"       Multi-instance overhead is within acceptable range")
+    else:
+        for i, issue in enumerate(issues, 1):
+            print(f"    {i}. ⚠️  {issue}")
+
+    sep("═")
+    print()
+
+
 def compare_files(filepaths: List[str]):
     print()
     sep("═")
@@ -810,6 +991,7 @@ def main():
     parser.add_argument("files", nargs="*", help="Result JSON files")
     parser.add_argument("--all", "-a", action="store_true", help="Analyze all result files")
     parser.add_argument("--compare", action="store_true", help="Compare multiple runs")
+    parser.add_argument("--baseline", type=str, help="Baseline JSON file: compare oversub vs single-instance baseline")
     parser.add_argument("--latest", "-l", action="store_true", help="Analyze latest result only")
     args = parser.parse_args()
 
@@ -829,6 +1011,20 @@ def main():
 
     if args.compare and len(files) > 1:
         compare_files(files)
+    elif args.baseline:
+        bl_file = args.baseline
+        if not os.path.exists(bl_file):
+            print(f"Baseline file not found: {bl_file}")
+            sys.exit(1)
+        oversub_file = files[0] if files else None
+        if not oversub_file:
+            print("No oversub result file provided.")
+            sys.exit(1)
+        with open(bl_file) as f:
+            bl_data = json.load(f)
+        with open(oversub_file) as f:
+            os_data = json.load(f)
+        compare_baseline(bl_data, os_data, bl_file, oversub_file)
     else:
         for fp in files:
             with open(fp, "r") as f:
